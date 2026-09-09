@@ -40,6 +40,15 @@ class Config:
                 "default_model": "gpt-3.5-turbo",
                 "timeout": 30,
             },
+            # Claude Code Pro/Max plan profile.
+            # Uses OAuth / keychain auth via the installed `claude` CLI.
+            # Set as default with: "default": "claude_code"
+            # Switch live in the TUI with: /provider claude_code
+            "claude_code": {
+                "type": "claude_code",
+                "default_model": "claude-sonnet-5",
+                "timeout": 300,
+            },
         },
         # Database "path" is a directory; ConversationDB stores
         # ``conversations.db`` (and ``media/``) inside it.

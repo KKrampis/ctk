@@ -24,6 +24,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ctk.core.config import get_config
 from ctk.llm.base import LLMProvider
+from ctk.llm.claude_code import ClaudeCodeProvider
 from ctk.llm.openai import OpenAIProvider
 
 
@@ -82,6 +83,19 @@ def build_provider(
     name = active_profile_name(profile)
     provider_config = cfg.get_provider_config(name) or {}
 
+    provider_type = provider_config.get("type", "openai")
+
+    # ---- Claude Code (Pro/Max plan, OAuth, subprocess) ----------------
+    if provider_type == "claude_code":
+        resolved_cc: Dict[str, Any] = {
+            "model": model or provider_config.get("default_model") or None,
+            "timeout": timeout or provider_config.get("timeout") or 300,
+            "profile_name": name,
+            "type": "claude_code",
+        }
+        return ClaudeCodeProvider(resolved_cc)
+
+    # ---- OpenAI-compatible (API key, HTTP) ----------------------------
     resolved: Dict[str, Any] = {
         "model": model or provider_config.get("default_model") or "gpt-3.5-turbo",
         "base_url": base_url
