@@ -73,9 +73,18 @@ class StreamToken(TextualMessage):
 class StreamDone(TextualMessage):
     """A streaming response finished (or errored)."""
 
-    def __init__(self, error: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        error: Optional[str] = None,
+        session_id: Optional[str] = None,
+        session_cwd: Optional[str] = None,
+    ) -> None:
         super().__init__()
         self.error = error
+        # Claude Code session info for resumption on the next turn.
+        # Both are None for non-ClaudeCode providers.
+        self.session_id = session_id
+        self.session_cwd = session_cwd
 
 
 class ChatAssistantText(TextualMessage):
@@ -422,8 +431,20 @@ class CTKApp(App):
         else:
             # Fast path: stream tokens straight into a single bubble.
             self._start_streaming_bubble(user_msg.id)
+            # For ClaudeCodeProvider: pass the saved session_id so the
+            # subprocess can resume instead of re-injecting the full history.
+            cc_session_id: Optional[str] = None
+            from ctk.llm.claude_code import ClaudeCodeProvider
+            if (
+                isinstance(self.provider, ClaudeCodeProvider)
+                and self._current_tree is not None
+            ):
+                cc_session_id = self._current_tree.metadata.custom_data.get(
+                    "claude_code_session_id"
+                )
             self._active_worker = self._stream_worker(
-                self._llm_history_for(self._current_tree)
+                self._llm_history_for(self._current_tree),
+                cc_session_id=cc_session_id,
             )
 
     def _render_system_note(self, text: str) -> None:
@@ -524,17 +545,39 @@ class CTKApp(App):
         return history
 
     @work(thread=True, exclusive=True)
-    def _stream_worker(self, history: List[LLMMessage]) -> None:
-        """Worker thread: pulls tokens from ``stream_chat`` and posts them."""
+    def _stream_worker(
+        self, history: List[LLMMessage], cc_session_id: Optional[str] = None
+    ) -> None:
+        """Worker thread: pulls tokens from ``stream_chat`` and posts them.
+
+        *cc_session_id* is forwarded to ``ClaudeCodeProvider.stream_chat`` so
+        it can resume an existing session instead of re-injecting history.
+        After the stream, the provider's ``last_session_id`` is included in
+        ``StreamDone`` for the UI thread to persist into the conversation.
+        """
+        from ctk.llm.claude_code import ClaudeCodeProvider
+
         try:
             assert self.provider is not None
-            for chunk in self.provider.stream_chat(history):
+            kwargs: Dict[str, Any] = {}
+            if isinstance(self.provider, ClaudeCodeProvider) and cc_session_id:
+                kwargs["claude_code_session_id"] = cc_session_id
+            for chunk in self.provider.stream_chat(history, **kwargs):
                 if chunk:
                     self.post_message(StreamToken(chunk))
         except Exception as exc:  # pragma: no cover — surfaces any provider error
             self.post_message(StreamDone(error=str(exc)))
             return
-        self.post_message(StreamDone())
+
+        # Carry the new/updated session_id to the UI thread
+        new_session_id: Optional[str] = None
+        new_session_cwd: Optional[str] = None
+        if isinstance(self.provider, ClaudeCodeProvider):
+            new_session_id = self.provider.last_session_id
+            new_session_cwd = self.provider.last_session_cwd
+        self.post_message(
+            StreamDone(session_id=new_session_id, session_cwd=new_session_cwd)
+        )
 
     # ------------------------------------------------------------------
     # Tool-aware chat path
@@ -892,6 +935,15 @@ class CTKApp(App):
             path = self._current_tree.get_longest_path()
             if path and path[-1].role == MessageRole.ASSISTANT:
                 path[-1].content = MessageContent(text=final_text)
+            # Persist Claude Code session_id so subsequent turns can resume
+            # instead of re-injecting the full history.
+            if event.session_id and event.session_cwd:
+                self._current_tree.metadata.custom_data[
+                    "claude_code_session_id"
+                ] = event.session_id
+                self._current_tree.metadata.custom_data[
+                    "claude_code_session_cwd"
+                ] = event.session_cwd
             self._safe_save(self._current_tree)
 
         self._streaming_bubble = None

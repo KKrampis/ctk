@@ -169,6 +169,11 @@ class ClaudeCodeProvider(LLMProvider):
             self.model = config.get("default_model") or DEFAULT_MODEL
         self.timeout: float = config.get("timeout") or 300.0
         self._claude_bin: Optional[str] = shutil.which("claude")
+        # Set by _iter_stream_events when the "system/init" line is parsed.
+        # The TUI reads these after stream_chat() returns to persist the
+        # session_id into the conversation's custom_data for future resumption.
+        self.last_session_id: Optional[str] = None
+        self.last_session_cwd: Optional[str] = None
 
     # ------------------------------------------------------------------
     # Availability
@@ -186,8 +191,19 @@ class ClaudeCodeProvider(LLMProvider):
         self,
         prompt: str,
         system_prompt: Optional[str],
+        session_id: Optional[str] = None,
     ) -> List[str]:
-        """Construct the ``claude`` subprocess argv."""
+        """Construct the ``claude`` subprocess argv.
+
+        Two operating modes:
+
+        * **Resuming** (``session_id`` provided): ``--resume <id>`` replays
+          Claude Code's own session so no history re-injection is needed and
+          the session file is kept for future turns.
+        * **Fresh** (no ``session_id``): starts a new persistent session so
+          subsequent turns can resume it. History is injected via
+          ``--system-prompt`` when there are prior turns to include.
+        """
         if self._claude_bin is None:
             raise LLMProviderError(
                 "The 'claude' binary is not on PATH. "
@@ -199,12 +215,18 @@ class ClaudeCodeProvider(LLMProvider):
             "--output-format", "stream-json",
             "--verbose",
             "--include-partial-messages",
-            "--no-session-persistence",
         ]
         if self.model:
             cmd += ["--model", self.model]
-        if system_prompt:
-            cmd += ["--system-prompt", system_prompt]
+
+        if session_id:
+            # Resume existing session — Claude Code already holds the context.
+            cmd += ["--resume", session_id]
+        else:
+            # New session: inject any prior-turn context and let the session
+            # file persist so the next turn can use --resume.
+            if system_prompt:
+                cmd += ["--system-prompt", system_prompt]
         return cmd
 
     def _extract_last_user_message(self, messages: List[Message]) -> str:
@@ -263,19 +285,14 @@ class ClaudeCodeProvider(LLMProvider):
     def _iter_stream_events(
         self,
         proc: "subprocess.Popen[bytes]",
-        session_info: Dict[str, str],
     ) -> Iterator[StreamEvent]:
         """Parse stream-json lines from *proc* stdout and yield StreamEvents.
 
         Relevant line types:
-        - ``system`` / ``init``           → captures session_id + cwd into *session_info*
+        - ``system`` / ``init``      → sets ``self.last_session_id`` / ``last_session_cwd``
         - ``stream_event`` / ``content_block_delta`` / ``text_delta`` → text chunk
-        - ``result``                      → done + finish_reason
+        - ``result``                 → done + finish_reason
         Everything else is silently skipped.
-
-        *session_info* is a mutable dict populated in-place when the ``init``
-        event is seen; the caller uses it after the generator is exhausted to
-        clean up the session's JSONL file.
         """
         assert proc.stdout is not None
         try:
@@ -291,10 +308,10 @@ class ClaudeCodeProvider(LLMProvider):
 
                 event_type = obj.get("type")
 
-                # Init event — grab session_id and cwd for later cleanup
+                # Init event — capture session_id and cwd for the caller
                 if event_type == "system" and obj.get("subtype") == "init":
-                    session_info["session_id"] = obj.get("session_id", "")
-                    session_info["cwd"] = obj.get("cwd", "")
+                    self.last_session_id = obj.get("session_id") or None
+                    self.last_session_cwd = obj.get("cwd") or None
                     continue
 
                 # Real-time text delta
@@ -324,12 +341,26 @@ class ClaudeCodeProvider(LLMProvider):
     def _run_streaming(
         self,
         messages: List[Message],
+        session_id: Optional[str] = None,
     ) -> Iterator[StreamEvent]:
-        """Start the ``claude`` subprocess, yield StreamEvents, then clean up."""
-        prompt = self._extract_last_user_message(messages)
-        system_prompt, _ = _format_history_as_system_prompt(messages)
+        """Start the ``claude`` subprocess and yield StreamEvents.
 
-        cmd = self._build_cmd(prompt, system_prompt)
+        When *session_id* is provided the subprocess uses ``--resume`` to
+        reconnect to Claude Code's existing session — no history re-injection
+        needed, saving tokens on every turn after the first.  When absent a
+        fresh session is started and its ID is captured via
+        ``self.last_session_id`` for the caller to persist.
+        """
+        self.last_session_id = None
+        self.last_session_cwd = None
+
+        prompt = self._extract_last_user_message(messages)
+        # Only inject history when starting fresh (no prior session to resume)
+        system_prompt: Optional[str] = None
+        if not session_id:
+            system_prompt, _ = _format_history_as_system_prompt(messages)
+
+        cmd = self._build_cmd(prompt, system_prompt, session_id=session_id)
         logger.debug("ClaudeCodeProvider cmd: %s", cmd)
 
         env = _build_subprocess_env()
@@ -343,10 +374,7 @@ class ClaudeCodeProvider(LLMProvider):
         except OSError as exc:
             raise LLMProviderError(f"Failed to launch claude: {exc}") from exc
 
-        # session_info is populated by _iter_stream_events when it sees the
-        # "system/init" line so we can delete the JSONL after streaming.
-        session_info: Dict[str, str] = {}
-        yield from self._iter_stream_events(proc, session_info)
+        yield from self._iter_stream_events(proc)
 
         # Check for subprocess error exit (non-zero after stream consumed)
         if proc.returncode and proc.returncode != 0:
@@ -356,12 +384,6 @@ class ClaudeCodeProvider(LLMProvider):
             logger.warning(
                 "claude exited %d: %s", proc.returncode, stderr_output[:500]
             )
-
-        # Delete the session JSONL Claude Code wrote for this headless run
-        self._delete_session_artifacts(
-            session_info.get("session_id", ""),
-            session_info.get("cwd", ""),
-        )
 
     # ------------------------------------------------------------------
     # LLMProvider interface
@@ -378,8 +400,14 @@ class ClaudeCodeProvider(LLMProvider):
 
         *temperature* and *max_tokens* are silently ignored — the ``claude``
         CLI does not expose those knobs in headless mode.
+
+        Pass ``claude_code_session_id=<id>`` via *kwargs* to resume an
+        existing Claude Code session instead of re-injecting history.  After
+        this method returns ``self.last_session_id`` holds the session ID for
+        the caller to persist.
         """
-        for event in self._run_streaming(messages):
+        session_id: Optional[str] = kwargs.get("claude_code_session_id")
+        for event in self._run_streaming(messages, session_id=session_id):
             if event.kind == "text" and event.text:
                 yield event.text
 
@@ -391,9 +419,10 @@ class ClaudeCodeProvider(LLMProvider):
         **kwargs: Any,
     ) -> ChatResponse:
         """Blocking chat: collect all streaming tokens into a ChatResponse."""
+        session_id: Optional[str] = kwargs.get("claude_code_session_id")
         chunks: List[str] = []
         finish_reason: Optional[str] = None
-        for event in self._run_streaming(messages):
+        for event in self._run_streaming(messages, session_id=session_id):
             if event.kind == "text":
                 chunks.append(event.text)
             elif event.kind == "done":

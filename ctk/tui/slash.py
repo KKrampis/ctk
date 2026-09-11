@@ -507,6 +507,14 @@ def cmd_delete(app: "CTKApp", args: str) -> Optional[str]:
     def _on_confirm(confirmed: Optional[bool]) -> None:
         if not confirmed:
             return
+        # If this conversation has a Claude Code session, delete its JSONL
+        # so the file does not linger in ~/.claude/projects/ after deletion.
+        from ctk.llm.claude_code import ClaudeCodeProvider
+
+        session_id = target.metadata.custom_data.get("claude_code_session_id")
+        session_cwd = target.metadata.custom_data.get("claude_code_session_cwd")
+        if session_id and session_cwd:
+            ClaudeCodeProvider._delete_session_artifacts(session_id, session_cwd)
         app.db.delete_conversation(target.id)
         app._current_tree = None
         if app.main is not None:
