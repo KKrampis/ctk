@@ -62,7 +62,7 @@ DB_DIR      = Path.home() / "Documents/GitHub/ctk-chats-db"
 OUTPUT_JSON = Path.home() / "Documents/GitHub/claude_export/conversations_filtered.json"
 
 # ── Filter settings ────────────────────────────────────────────────────────
-MIN_MESSAGES = 6
+MIN_MESSAGES = 4
 
 EXCLUDE_PATTERNS = [
     r"monitor", r"e.?reader", r"ebook", r"boox", r"kindle", r"kobo",
@@ -70,6 +70,37 @@ EXCLUDE_PATTERNS = [
     r"lineage.?os", r"eizo", r"max lumi", r"max tab",
 ]
 EXCLUDE_RE = re.compile("|".join(EXCLUDE_PATTERNS), re.IGNORECASE)
+
+# Content block types injected by Claude's server — not real conversation
+# content; strip them so they don't cause rendering noise in CTK.
+_STRIP_BLOCK_TYPES = {
+    "injected_prompt_block",  # date/time notes, system-reminder injections
+    "token_budget",           # internal token accounting metadata
+}
+
+
+def clean_messages(convs: list) -> list:
+    """Strip server-injected and empty block types from message content in place."""
+    for conv in convs:
+        for msg in conv.get("chat_messages", []):
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            cleaned = []
+            for part in content:
+                if not isinstance(part, dict):
+                    cleaned.append(part)
+                    continue
+                btype = part.get("type", "")
+                if btype in _STRIP_BLOCK_TYPES:
+                    continue  # drop entirely
+                if btype == "document" and not part.get("file_content") and not part.get("content"):
+                    # File reference with no actual content exported — skip
+                    continue
+                cleaned.append(part)
+            msg["content"] = cleaned
+    return convs
+
 
 # Words too short or generic to be useful for project matching
 _STOP = {
@@ -391,6 +422,9 @@ def main() -> None:
     project_kws = build_project_keywords(projects)
     print(f"  {len(project_kws)} named projects available for tagging")
     print()
+
+    # ── 2b. Clean message content ─────────────────────────────────────────
+    convs = clean_messages(convs)
 
     # ── 3. Load existing IDs ───────────────────────────────────────────────
     print("Step 3: checking existing DB …")

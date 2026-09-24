@@ -18,7 +18,7 @@ from pathlib import Path
 INPUT  = Path.home() / "Documents/GitHub/claude_export/conversations.json"
 OUTPUT = Path.home() / "Documents/GitHub/claude_export/conversations_filtered.json"
 
-MIN_MESSAGES = 6
+MIN_MESSAGES = 4
 
 # Title patterns to exclude (case-insensitive, partial match)
 EXCLUDE_PATTERNS = [
