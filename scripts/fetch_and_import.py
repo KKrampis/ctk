@@ -79,26 +79,107 @@ _STRIP_BLOCK_TYPES = {
 }
 
 
+def _tool_use_to_text(part: dict) -> str:
+    """Convert a tool_use block to a readable one-liner annotation."""
+    name = part.get("name", "unknown")
+    inp  = part.get("input") or {}
+    if name == "web_search":
+        query = inp.get("query", "")
+        return f"🔍 Web search: {query!r}"
+    elif name in ("web_fetch", "web_fetch_parallel"):
+        url = inp.get("url") or inp.get("urls") or ""
+        return f"🌐 Web fetch: {url}"
+    else:
+        args = json.dumps(inp)[:120] if inp else ""
+        return f"🔧 Tool call: {name}({args})"
+
+
+def _tool_result_to_text(part: dict) -> str:
+    """Convert a tool_result block (web search results etc.) to readable text."""
+    content = part.get("content", [])
+    if isinstance(content, str):
+        return content[:800]
+    if not isinstance(content, list):
+        return ""
+    lines = []
+    for item in content[:8]:          # cap at 8 results
+        if not isinstance(item, dict):
+            continue
+        itype = item.get("type", "")
+        if itype == "knowledge":
+            title = item.get("title", "")
+            url   = item.get("url", "")
+            if title:
+                lines.append(f"• {title}")
+            if url:
+                lines.append(f"  {url}")
+        elif itype == "text":
+            text = (item.get("text") or "").strip()
+            if text:
+                lines.append(text[:400])
+    return "\n".join(lines)
+
+
 def clean_messages(convs: list) -> list:
-    """Strip server-injected and empty block types from message content in place."""
+    """Clean message content for CTK display:
+    - Drop server-injected blocks (injected_prompt_block, token_budget).
+    - Drop bare document references (no exported content).
+    - Convert tool_use / tool_result blocks to readable text so CTK
+      can display them in the message bubble instead of showing nothing.
+    """
     for conv in convs:
         for msg in conv.get("chat_messages", []):
             content = msg.get("content")
             if not isinstance(content, list):
                 continue
-            cleaned = []
+
+            text_parts:  list[dict] = []
+            extra_lines: list[str]  = []
+            keep_parts:  list[dict] = []   # image / thinking / etc.
+
             for part in content:
                 if not isinstance(part, dict):
-                    cleaned.append(part)
+                    keep_parts.append(part)
                     continue
                 btype = part.get("type", "")
+
                 if btype in _STRIP_BLOCK_TYPES:
-                    continue  # drop entirely
-                if btype == "document" and not part.get("file_content") and not part.get("content"):
-                    # File reference with no actual content exported — skip
-                    continue
-                cleaned.append(part)
-            msg["content"] = cleaned
+                    continue                         # silently drop
+
+                elif btype == "document":
+                    if part.get("file_content") or part.get("content"):
+                        keep_parts.append(part)      # has real content
+                    else:
+                        title = part.get("title", "file")
+                        extra_lines.append(f"📎 Attached: {title}")
+
+                elif btype == "tool_use":
+                    extra_lines.append(_tool_use_to_text(part))
+
+                elif btype == "tool_result":
+                    result_text = _tool_result_to_text(part)
+                    if result_text:
+                        extra_lines.append(result_text)
+
+                elif btype == "text":
+                    text_parts.append(part)
+
+                else:
+                    keep_parts.append(part)          # image, thinking, etc.
+
+            # Merge extra_lines into the text content
+            if extra_lines:
+                note = "\n".join(extra_lines)
+                if text_parts:
+                    # Append tool annotations after the existing text
+                    text_parts[-1] = dict(
+                        text_parts[-1],
+                        text=(text_parts[-1].get("text") or "") + "\n\n" + note,
+                    )
+                else:
+                    text_parts = [{"type": "text", "text": note}]
+
+            msg["content"] = text_parts + keep_parts
     return convs
 
 
@@ -324,6 +405,43 @@ def should_keep(conv: dict) -> tuple[bool, str]:
     return True, ""
 
 
+def filter_by_project_terms(
+    convs: list,
+    project_kws: dict[str, set[str]],
+    terms: list[str],
+) -> tuple[list, list]:
+    """Keep only conversations whose matched project tags contain any of *terms*
+    (case-insensitive partial match against project names).
+
+    Returns (kept, dropped_with_reason).
+    """
+    if not terms:
+        return convs, []
+
+    # Resolve which project names satisfy any term
+    matching_projects: set[str] = set()
+    for proj_name in project_kws:
+        for t in terms:
+            if t.lower() in proj_name.lower():
+                matching_projects.add(proj_name)
+
+    print(f"  Project filter terms  : {terms}")
+    print(f"  Matching project names: {sorted(matching_projects)}")
+    if not matching_projects:
+        print("  WARNING: no projects matched — importing nothing")
+        return [], [(c, "no project match") for c in convs]
+
+    kept, dropped = [], []
+    for c in convs:
+        title = c.get("name") or c.get("title") or ""
+        tags  = match_projects(title, project_kws)
+        if any(t in matching_projects for t in tags):
+            kept.append(c)
+        else:
+            dropped.append((c, "not in selected projects"))
+    return kept, dropped
+
+
 def filter_and_dedup(
     convs: list, existing_ids: set[str]
 ) -> tuple[list, list]:
@@ -380,13 +498,20 @@ def main() -> None:
         help="Skip download — use this conversations.json directly")
     parser.add_argument("--zip", type=Path, dest="zip_path",
         help="Skip download — use this conversations ZIP directly")
+    parser.add_argument("--projects", type=str, default="",
+        help="Comma-separated project name terms (partial match). "
+             "Only conversations tagged with a matching project are imported. "
+             "Example: --projects 'Persona,Minds'")
     parser.add_argument("--dry-run", action="store_true",
         help="Preview only, import nothing")
     args = parser.parse_args()
 
+    project_terms = [t.strip() for t in args.projects.split(",") if t.strip()]
+
     print("\n=== Claude export import ===")
-    print(f"DB      : {DB_DIR}")
-    print(f"Dry-run : {args.dry_run}\n")
+    print(f"DB       : {DB_DIR}")
+    print(f"Projects : {project_terms or '(all)'}")
+    print(f"Dry-run  : {args.dry_run}\n")
 
     # ── 1. Load conversations ──────────────────────────────────────────────
     projects_zip_dir: Path = DOWNLOADS
@@ -450,6 +575,16 @@ def main() -> None:
     if not kept:
         print("Nothing new to import.")
         return
+
+    # ── 4b. Project filter (--projects) ────────────────────────────────────
+    if project_terms:
+        print("Step 4b: applying project filter …")
+        kept, proj_dropped = filter_by_project_terms(kept, project_kws, project_terms)
+        print(f"  After project filter: {len(kept)} kept, {len(proj_dropped)} dropped")
+        print()
+        if not kept:
+            print("Nothing matched the project filter.")
+            return
 
     # ── 5. Preview project tagging ─────────────────────────────────────────
     print("To be imported (with matched project tags):")
