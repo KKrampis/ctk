@@ -42,7 +42,19 @@ import json
 import re
 import sqlite3
 import zipfile
-from urllib import request as urllib_request
+
+try:
+    import requests as _requests
+    _HAS_REQUESTS = True
+except ImportError:
+    from urllib import request as urllib_request
+    _HAS_REQUESTS = False
+
+_BROWSER_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36"
+)
 
 # ── Paths ──────────────────────────────────────────────────────────────────
 DOWNLOADS   = Path.home() / "Downloads"
@@ -192,7 +204,23 @@ def _download_category(manifest_data: dict, category: str, dest_dir: Path) -> Pa
         return zip_path
     print(f"  Downloading {entry['filename']} …")
     try:
-        urllib_request.urlretrieve(entry["export_url"], zip_path)
+        if _HAS_REQUESTS:
+            resp = _requests.get(
+                entry["export_url"],
+                headers={"User-Agent": _BROWSER_UA},
+                stream=True,
+                timeout=120,
+            )
+            resp.raise_for_status()
+            with open(zip_path, "wb") as fh:
+                for chunk in resp.iter_content(chunk_size=1 << 20):
+                    fh.write(chunk)
+        else:
+            from urllib.request import Request, urlopen
+            req = Request(entry["export_url"], headers={"User-Agent": _BROWSER_UA})
+            with urlopen(req, timeout=120) as r, open(zip_path, "wb") as fh:
+                while chunk := r.read(1 << 20):
+                    fh.write(chunk)
         print(f"  Saved → {zip_path}")
     except Exception as exc:
         # URL already consumed — try to find an existing file
