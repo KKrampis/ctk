@@ -79,6 +79,19 @@ _STRIP_BLOCK_TYPES = {
 }
 
 
+# Regex to strip the "This block is not supported" fenced code block that
+# Claude's web UI injects into exported text when it can't render a block.
+_UNSUPPORTED_BLOCK_RE = re.compile(
+    r"```\s*\nThis block is not supported[^\n]*\n```\n?",
+    re.IGNORECASE,
+)
+
+
+def _clean_text(text: str) -> str:
+    """Remove 'block not supported' fences injected by Claude's web exporter."""
+    return _UNSUPPORTED_BLOCK_RE.sub("", text).strip()
+
+
 def _tool_use_to_text(part: dict) -> str:
     """Convert a tool_use block to a readable one-liner annotation."""
     name = part.get("name", "unknown")
@@ -129,6 +142,10 @@ def clean_messages(convs: list) -> list:
     """
     for conv in convs:
         for msg in conv.get("chat_messages", []):
+            # Clean the top-level text field (what the CTK importer reads directly)
+            if msg.get("text"):
+                msg["text"] = _clean_text(msg["text"])
+
             content = msg.get("content")
             if not isinstance(content, list):
                 continue
@@ -162,22 +179,24 @@ def clean_messages(convs: list) -> list:
                         extra_lines.append(result_text)
 
                 elif btype == "text":
-                    text_parts.append(part)
+                    cleaned_text = _clean_text(part.get("text") or "")
+                    if cleaned_text:
+                        text_parts.append({**part, "text": cleaned_text})
 
                 else:
                     keep_parts.append(part)          # image, thinking, etc.
 
             # Merge extra_lines into the text content
             if extra_lines:
-                note = "\n".join(extra_lines)
-                if text_parts:
-                    # Append tool annotations after the existing text
-                    text_parts[-1] = dict(
-                        text_parts[-1],
-                        text=(text_parts[-1].get("text") or "") + "\n\n" + note,
-                    )
-                else:
-                    text_parts = [{"type": "text", "text": note}]
+                note = "\n".join(filter(None, extra_lines))
+                if note:
+                    if text_parts:
+                        text_parts[-1] = dict(
+                            text_parts[-1],
+                            text=(text_parts[-1].get("text") or "") + "\n\n" + note,
+                        )
+                    else:
+                        text_parts = [{"type": "text", "text": note}]
 
             msg["content"] = text_parts + keep_parts
     return convs
