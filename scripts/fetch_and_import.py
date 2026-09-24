@@ -221,7 +221,20 @@ def _download_category(manifest_data: dict, category: str, dest_dir: Path) -> Pa
             with urlopen(req, timeout=120) as r, open(zip_path, "wb") as fh:
                 while chunk := r.read(1 << 20):
                     fh.write(chunk)
-        print(f"  Saved → {zip_path}")
+        # Verify it's actually a ZIP (the server may return an HTML login page)
+        with open(zip_path, "rb") as fh:
+            magic = fh.read(4)
+        if magic[:2] == b"PK":
+            print(f"  Saved → {zip_path}")
+        else:
+            zip_path.unlink(missing_ok=True)
+            raise RuntimeError(
+                "Server returned an HTML page instead of a ZIP.\n"
+                "The download URL requires your browser session.\n"
+                f"Please open this URL in Chrome/Safari and save the file to {dest_dir}:\n\n"
+                f"  {entry['export_url']}\n\n"
+                f"Then re-run the script — it will detect the saved file automatically."
+            )
     except Exception as exc:
         # URL already consumed — try to find an existing file
         fallback = sorted(dest_dir.glob(f"{category}-*.zip"),
@@ -334,6 +347,8 @@ def main() -> None:
         help="Manifest JSON (default: latest manifest-*.json in ~/Downloads)")
     parser.add_argument("--json", type=Path, dest="json_path",
         help="Skip download — use this conversations.json directly")
+    parser.add_argument("--zip", type=Path, dest="zip_path",
+        help="Skip download — use this conversations ZIP directly")
     parser.add_argument("--dry-run", action="store_true",
         help="Preview only, import nothing")
     args = parser.parse_args()
@@ -344,7 +359,11 @@ def main() -> None:
 
     # ── 1. Load conversations ──────────────────────────────────────────────
     projects_zip_dir: Path = DOWNLOADS
-    if args.json_path:
+    if args.zip_path:
+        print(f"Step 1: extracting from {args.zip_path} …")
+        convs = extract_conversations(args.zip_path)
+        projects_zip_dir = args.zip_path.parent
+    elif args.json_path:
         print(f"Step 1: loading from {args.json_path} …")
         with open(args.json_path) as f:
             data = json.load(f)
