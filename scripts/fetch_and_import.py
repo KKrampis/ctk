@@ -24,16 +24,16 @@ Requires the CTK venv — the script auto-restarts with .venv/bin/python3
 if run with a bare python3.
 """
 
-# ── Auto-reexec with venv Python ───────────────────────────────────────────
+# ── Ensure venv site-packages are on sys.path ──────────────────────────────
 import os
+import site
 import sys
 from pathlib import Path
 
-_VENV_PY = Path(__file__).parent.parent / ".venv/bin/python3"
-if _VENV_PY.exists() and os.path.realpath(sys.executable) != os.path.realpath(
-    str(_VENV_PY)
-):
-    os.execv(str(_VENV_PY), [str(_VENV_PY)] + sys.argv)
+_VENV_SITE = Path(__file__).parent.parent / ".venv/lib"
+for _sp in _VENV_SITE.glob("python*/site-packages"):
+    if str(_sp) not in sys.path:
+        site.addsitedir(str(_sp))
 
 # ── Standard imports (CTK venv available from here) ───────────────────────
 import argparse
