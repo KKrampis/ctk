@@ -356,6 +356,9 @@ class CTKApp(App):
             bits.append(meta.model)
         msg_count = len(tree.message_map)
         bits.append(f"{msg_count} msg")
+        branches = tree.count_branches()
+        if branches:
+            bits.append(f"⑃ {branches} branch{'es' if branches != 1 else ''}")
         return "  •  ".join(bits)
 
     # ------------------------------------------------------------------

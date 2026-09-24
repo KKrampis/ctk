@@ -511,6 +511,7 @@ class ConversationSummary:
     archived_at: Optional[datetime] = None
     slug: Optional[str] = None
     summary: Optional[str] = None
+    branch_count: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary"""

@@ -39,7 +39,11 @@ def _flags(conv) -> str:
 
 def _title(conv) -> str:
     title = getattr(conv, "title", None) or "(untitled)"
-    return title if len(title) <= 32 else title[:30] + "…"
+    branch_count = getattr(conv, "branch_count", 0)
+    suffix = f" ⑃{branch_count}" if branch_count else ""
+    max_title = 32 - len(suffix)
+    short = title if len(title) <= max_title else title[:max_title - 2] + "…"
+    return short + suffix
 
 
 # Tab id -> (label, filter_mode). Order is the strip order.
@@ -201,15 +205,25 @@ class ConversationList(Vertical):
 
     def _merge_page(self, page: PaginatedResult) -> int:
         """Append page items to the table; update cursor / has_more."""
+        # Batch-fetch branch counts for all conversations in this page
+        conv_ids = [str(getattr(c, "id", "")) for c in page.items]
+        branch_counts: dict[str, int] = {}
+        try:
+            branch_counts = self._db.batch_branch_counts(conv_ids)
+        except Exception:
+            pass  # non-critical — sidebar still works without counts
+
         added = 0
         for conv in page.items:
+            conv_id = str(getattr(conv, "id", ""))
+            conv.branch_count = branch_counts.get(conv_id, 0)
             updated = getattr(conv, "updated_at", None)
             updated_str = updated.strftime("%Y-%m-%d") if updated else ""
             self._table.add_row(
                 _flags(conv),
                 _title(conv),
                 updated_str,
-                key=str(getattr(conv, "id", "")),
+                key=conv_id,
             )
             self._conversations.append(conv)
             added += 1

@@ -3042,6 +3042,34 @@ class ConversationDB:
             all_tags = session.query(TagModel.name).all()
             return sorted([t[0] for t in all_tags])
 
+    def batch_branch_counts(self, conv_ids: List[str]) -> Dict[str, int]:
+        """Return {conv_id: branch_point_count} for the given conversation ids.
+
+        A branch point is a message whose parent has more than one child.
+        Conversations with no branching are omitted (treat missing as 0).
+        Uses raw SQL for efficiency — no ORM round-trip.
+        """
+        if not conv_ids:
+            return {}
+        import sqlalchemy as sa
+
+        placeholders = ",".join(f"'{cid}'" for cid in conv_ids)
+        sql = f"""
+            SELECT conversation_id, COUNT(*) AS branch_points
+            FROM (
+                SELECT conversation_id, parent_id
+                FROM messages
+                WHERE parent_id IS NOT NULL
+                  AND conversation_id IN ({placeholders})
+                GROUP BY conversation_id, parent_id
+                HAVING COUNT(*) > 1
+            ) bp
+            GROUP BY conversation_id
+        """
+        with self.Session() as session:
+            rows = session.execute(sa.text(sql)).fetchall()
+        return {row[0]: row[1] for row in rows}
+
     def close(self):
         """Close database connection"""
         self.Session.remove()
