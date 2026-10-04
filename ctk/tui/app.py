@@ -221,6 +221,7 @@ class CTKApp(App):
         Binding("right_square_bracket", "next_sibling", "next branch", show=False),
         Binding("ctrl+g", "edit_system_prompt", "system prompt"),
         Binding("ctrl+o", "attach_file", "attach file"),
+        Binding("ctrl+backslash", "toggle_sidebar", "toggle sidebar", show=False),
     ]
 
     def __init__(
@@ -979,6 +980,18 @@ class CTKApp(App):
         if self.sidebar is not None:
             self.sidebar.refresh_list()
         self._refresh_status()
+
+    def action_toggle_sidebar(self) -> None:
+        """Ctrl+\\: hide or show the conversation list panel."""
+        if self.sidebar is None:
+            return
+        if self.sidebar.has_class("hidden"):
+            self.sidebar.remove_class("hidden")
+            self.sidebar.focus_table()
+        else:
+            self.sidebar.add_class("hidden")
+            if self.main is not None:
+                self.main.input.focus()
 
     def action_toggle_star(self) -> None:
         if self.sidebar is None or self._current_tree is None:

@@ -15,6 +15,10 @@ Screen {
     padding: 0 1;
 }
 
+#sidebar.hidden {
+    display: none;
+}
+
 #sidebar-title {
     color: $accent;
     text-style: bold;
