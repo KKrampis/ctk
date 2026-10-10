@@ -174,6 +174,14 @@ class ClaudeCodeProvider(LLMProvider):
         # session_id into the conversation's custom_data for future resumption.
         self.last_session_id: Optional[str] = None
         self.last_session_cwd: Optional[str] = None
+        # When set, the ``claude`` subprocess is launched with this directory
+        # as its CWD so Claude Code anchors all session JSONL files to a
+        # stable, CTK-owned path.  Set by CTKApp.set_provider() to
+        # ``<db_dir>/claude-sessions/``.  Without this, sessions scatter under
+        # ``~/.claude/projects/<whatever-cwd-ctk-launched-from>/`` and
+        # ``--resume`` silently fails when CTK is opened from a different
+        # working directory.
+        self.sessions_dir: Optional[Path] = None
 
     # ------------------------------------------------------------------
     # Availability
@@ -364,13 +372,26 @@ class ClaudeCodeProvider(LLMProvider):
         logger.debug("ClaudeCodeProvider cmd: %s", cmd)
 
         env = _build_subprocess_env()
+        popen_kwargs: Dict[str, Any] = {
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "env": env,
+        }
+        if self.sessions_dir is not None:
+            # Ensure the directory exists; if creation fails, fall back to
+            # the default CWD rather than crashing the whole chat turn.
+            try:
+                self.sessions_dir.mkdir(parents=True, exist_ok=True)
+                popen_kwargs["cwd"] = str(self.sessions_dir)
+                logger.debug("ClaudeCode sessions dir: %s", self.sessions_dir)
+            except OSError as exc:
+                logger.warning(
+                    "Could not create sessions_dir %s: %s — using default CWD",
+                    self.sessions_dir,
+                    exc,
+                )
         try:
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                env=env,
-            )
+            proc = subprocess.Popen(cmd, **popen_kwargs)
         except OSError as exc:
             raise LLMProviderError(f"Failed to launch claude: {exc}") from exc
 

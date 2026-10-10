@@ -23,6 +23,7 @@ import logging
 import time
 import uuid
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from rich.text import Text
@@ -272,6 +273,20 @@ class CTKApp(App):
             provider is not None and provider.supports_tool_calling()
         )
         self.enable_tools = self._tools_supported and self._tools_requested
+        # Pin ClaudeCode session files to a stable, CTK-owned directory so
+        # ``--resume`` always finds them, regardless of where `ctk` was
+        # launched from.  Sessions live at:
+        #   ~/.claude/projects/<db-dir-normalized>/claude-sessions/<id>.jsonl
+        from ctk.llm.claude_code import ClaudeCodeProvider as _CCP
+
+        if isinstance(provider, _CCP):
+            _db = getattr(self, "db", None)
+            if _db is not None:
+                _db_dir = getattr(_db, "db_dir", None) or getattr(
+                    _db, "db_path", None
+                )
+                if _db_dir is not None:
+                    provider.sessions_dir = Path(str(_db_dir)) / "claude-sessions"
 
     # ------------------------------------------------------------------
     # Composition
